@@ -8,8 +8,10 @@ on:
 
 env:
   OCI_CLI_REGION: "ap-singapore-1"
-  # AD / subnet / image IDs are looked up automatically via the OCI API
-  # (same logic as the laptop retry script) - no secrets needed for them.
+  # Singapore-specific IDs come from secrets (fill in your own values)
+  AD_NAME: ${{ secrets.OCI_AD_NAME }}
+  IMAGE_ID: ${{ secrets.OCI_IMAGE_ID }}
+  SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
   COMPARTMENT_ID: ${{ secrets.OCI_COMPARTMENT_ID }}
   OCI_CLI_USER: ${{ secrets.OCI_CLI_USER }}
   OCI_CLI_TENANCY: ${{ secrets.OCI_CLI_TENANCY }}
@@ -46,68 +48,13 @@ jobs:
           EOF
           echo "${{ secrets.SSH_PUBLIC_KEY }}" > /home/runner/my_ssh_key.pub
 
-      - name: Lookup AD, subnet and images
-        id: lookup
-        run: |
-          AD_NAME=$(oci iam availability-domain list \
-            --compartment-id "$COMPARTMENT_ID" \
-            --query 'data[0].name' --raw-output 2>/dev/null)
-          echo "AD: $AD_NAME"
-
-          VCN_ID=$(oci network vcn list \
-            --compartment-id "$COMPARTMENT_ID" \
-            --display-name "zinminthu-vcn" \
-            --query 'data[0].id' --raw-output 2>/dev/null)
-          echo "VCN: $VCN_ID"
-
-          SUBNET_ID=$(oci network subnet list \
-            --compartment-id "$COMPARTMENT_ID" \
-            --vcn-id "$VCN_ID" 2>/dev/null | python3 -c "
-          import json, sys
-          subs = json.load(sys.stdin)['data']
-          pub = [s for s in subs if 'public' in s.get('display-name', '').lower()]
-          pick = (pub or subs)[0] if subs else None
-          print(pick['id'] if pick else '')
-          ")
-          echo "Subnet: $SUBNET_ID"
-
-          IMAGE_ARM=$(oci compute image list \
-            --compartment-id "$COMPARTMENT_ID" \
-            --operating-system "Canonical Ubuntu" \
-            --operating-system-version "22.04" \
-            --shape "VM.Standard.A1.Flex" \
-            --sort-by TIMECREATED --sort-order DESC --limit 5 \
-            --query 'data[0].id' --raw-output 2>/dev/null)
-          echo "Image ARM: $IMAGE_ARM"
-
-          IMAGE_AMD=$(oci compute image list \
-            --compartment-id "$COMPARTMENT_ID" \
-            --operating-system "Canonical Ubuntu" \
-            --operating-system-version "22.04" \
-            --shape "VM.Standard.E2.1.Micro" \
-            --sort-by TIMECREATED --sort-order DESC --limit 5 \
-            --query 'data[0].id' --raw-output 2>/dev/null)
-          echo "Image AMD: $IMAGE_AMD"
-
-          for v in "$AD_NAME" "$VCN_ID" "$SUBNET_ID" "$IMAGE_ARM" "$IMAGE_AMD"; do
-            if [ -z "$v" ] || [ "$v" = "null" ]; then
-              echo "❌ Lookup failed — one of AD/VCN/subnet/image came back empty."
-              exit 1
-            fi
-          done
-
-          echo "ad_name=$AD_NAME" >> $GITHUB_OUTPUT
-          echo "subnet_id=$SUBNET_ID" >> $GITHUB_OUTPUT
-          echo "image_arm=$IMAGE_ARM" >> $GITHUB_OUTPUT
-          echo "image_amd=$IMAGE_AMD" >> $GITHUB_OUTPUT
-
       - name: Check if Ampere VM already exists
         id: check_ampere
         run: |
           EXISTING=$(oci compute instance list \
             --compartment-id "$COMPARTMENT_ID" \
             --lifecycle-state RUNNING \
-            --query "data[?contains(\"display-name\", 'oci-ampere') || shape=='VM.Standard.A1.Flex'].id" \
+            --query 'data[?contains("display-name", `oci-ampere`) || shape==`VM.Standard.A1.Flex`].id' \
             --raw-output 2>/dev/null || echo "")
           if [ -n "$EXISTING" ] && [ "$EXISTING" != "[]" ] && [ "$EXISTING" != "" ]; then
             echo "exists=true" >> $GITHUB_OUTPUT
@@ -125,11 +72,11 @@ jobs:
           set -o pipefail
           OCI_OUTPUT=$(oci compute instance launch \
             --compartment-id "$COMPARTMENT_ID" \
-            --availability-domain "${{ steps.lookup.outputs.ad_name }}" \
+            --availability-domain "$AD_NAME" \
             --shape "VM.Standard.A1.Flex" \
             --shape-config '{"ocpus":2,"memoryInGBs":12}' \
-            --subnet-id "${{ steps.lookup.outputs.subnet_id }}" \
-            --image-id "${{ steps.lookup.outputs.image_arm }}" \
+            --subnet-id "$SUBNET_ID" \
+            --image-id "$IMAGE_ID" \
             --ssh-authorized-keys-file "/home/runner/my_ssh_key.pub" \
             --assign-public-ip true \
             --display-name "oci-ampere-2-12" \
@@ -155,7 +102,7 @@ jobs:
           EXISTING=$(oci compute instance list \
             --compartment-id "$COMPARTMENT_ID" \
             --lifecycle-state RUNNING \
-            --query "data[?shape=='VM.Standard.E2.1.Micro'].id" \
+            --query 'data[?shape==`VM.Standard.E2.1.Micro`].id' \
             --raw-output 2>/dev/null || echo "")
           if [ -n "$EXISTING" ] && [ "$EXISTING" != "[]" ] && [ "$EXISTING" != "" ]; then
             echo "exists=true" >> $GITHUB_OUTPUT
@@ -171,10 +118,10 @@ jobs:
           set -o pipefail
           OCI_OUTPUT=$(oci compute instance launch \
             --compartment-id "$COMPARTMENT_ID" \
-            --availability-domain "${{ steps.lookup.outputs.ad_name }}" \
+            --availability-domain "$AD_NAME" \
             --shape "VM.Standard.E2.1.Micro" \
-            --subnet-id "${{ steps.lookup.outputs.subnet_id }}" \
-            --image-id "${{ steps.lookup.outputs.image_amd }}" \
+            --subnet-id "$SUBNET_ID" \
+            --image-id "$IMAGE_ID" \
             --ssh-authorized-keys-file "/home/runner/my_ssh_key.pub" \
             --assign-public-ip true \
             --display-name "oci-amd-micro" \
